@@ -24,17 +24,17 @@ ATTR_NAMES = [
 ]
 ATTR_RANGES = {
     "alignment_weight": (0.05, 0.05),
-    "cohesion_weight": (0.01, 0.05),
+    "cohesion_weight": (0.01, 0.01),
     "separation_weight": (0.1, 0.1),
     "neighbor_radius": (10.0, 10.0),
-    "separation_radius": (4.0, 4.0),
+    "separation_radius": (3.0, 5.0),
 }
 
 # 碰撞死亡阈值：距离 <= 1.0 撞死
 COLLISION_DIST = 0.2
 
 # 可视化：选择用哪个属性上色（五选一）
-COLOR_BY = "cohesion_weight"   # 可以设置为 'alignment_weight', 'cohesion_weight', 'separation_weight', 'neighbor_radius', 'separation_radius'
+COLOR_BY = "separation_radius"   # 可以设置为 'alignment_weight', 'cohesion_weight', 'separation_weight', 'neighbor_radius', 'separation_radius'
 
 
 def limit_speed(v, max_speed):
