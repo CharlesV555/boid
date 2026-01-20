@@ -29,15 +29,15 @@ ATTR_RANGES = {
     "alignment_weight": (0.05, 0.05),
     "cohesion_weight": (0.01, 0.01),
     "separation_weight": (0.1, 0.1),
-    "neighbor_radius": (10.0, 10.0),
-    "separation_radius": (3.0, 5.0),
+    "neighbor_radius": (10.0, 15.0),
+    "separation_radius": (5.0, 5.0),
 }
 
 # 碰撞死亡阈值：距离 <= 1.0 撞死
 COLLISION_DIST = 0.2
 
 # 可视化：选择用哪个属性上色（五选一）
-COLOR_BY = "separation_radius"   # 可以设置为 'alignment_weight', 'cohesion_weight', 'separation_weight', 'neighbor_radius', 'separation_radius'
+COLOR_BY = "neighbor_radius"   # 可以设置为 'alignment_weight', 'cohesion_weight', 'separation_weight', 'neighbor_radius', 'separation_radius'
 
 
 def limit_speed(min_speed, v, max_speed):
@@ -149,7 +149,7 @@ class BoidsSim:
             
             ##########
             # 速度合成
-            factor = (1.0 + np.log(s_r / (max(mean_dist, s_r))))
+            factor = (1.0 + np.log(s_r / (min(mean_dist, s_r))))
             
             dv_align = a_w * alignment
             dv_coh   = c_w * cohesion

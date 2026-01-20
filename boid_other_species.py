@@ -13,29 +13,33 @@ import cmocean
 NUM_BOIDS = 120
 WIDTH, HEIGHT = 100, 100
 MAX_SPEED = 10
+MIN_SPEED = 0.01
 
-# 进化/初始化的参数范围（可按需调整）
-# 可以一步一步固定着看
+NUM_SPECIES = 3
+
 ATTR_NAMES = [
+    "species_id",
     "alignment_weight",
     "cohesion_weight",
     "separation_weight",
     "neighbor_radius",
     "separation_radius",
 ]
-ATTR_RANGES = {
-    "alignment_weight": (0.05, 0.05),
-    "cohesion_weight": (0.01, 0.01),
-    "separation_weight": (0.1, 0.1),
-    "neighbor_radius": (10.0, 15.0),
-    "separation_radius": (5.0, 5.0),
-}
+
+ALIGNMENT_WEIGHT_RANGE = (0.05, 0.05)
+COHESION_WEIGHT_RANGE = (0.01, 0.01)
+SEPARATION_WEIGHT_RANGE = (0.1, 0.1)
+NEIGHBOR_RADIUS_RANGE = (15.0, 15.0)
+SEPARATION_RADIUS_RANGE = (3.0, 5.0)
+
+SEPARATION_WEIGHT_OTHER_RANGE = (0.10, 0.40)   # 跨物种更强一些（示例）
+SEPARATION_RADIUS_OTHER_RANGE = (15.0, 15.0)     # 跨物种作用半径（示例）
 
 # 碰撞死亡阈值：距离 <= 1.0 撞死
 COLLISION_DIST = 0.2
 
 # 可视化：选择用哪个属性上色（五选一）
-COLOR_BY = "neighbor_radius"   # 可以设置为 'alignment_weight', 'cohesion_weight', 'separation_weight', 'neighbor_radius', 'separation_radius'
+COLOR_BY = "species_id"   # 可以设置为 'alignment_weight', 'cohesion_weight', 'separation_weight', 'neighbor_radius', 'separation_radius'
 
 
 def limit_speed(v, max_speed):
@@ -44,15 +48,25 @@ def limit_speed(v, max_speed):
         return v / speed * max_speed
     return v
 
+def initialize_species_and_attributes(rng):
+        p = np.array([0.5, 0.3, 0.2])
+        species_id = rng.choice(NUM_SPECIES, size=NUM_BOIDS, p=p).astype(np.int32)
 
-def random_attrs(n, rng):
-    """随机初始化每只鸟的个体属性 attrs: (n,5)"""
-    cols = []
-    for name in ATTR_NAMES:
-        lo, hi = ATTR_RANGES[name]
-        cols.append(rng.uniform(lo, hi, size=n))
-    return np.column_stack(cols)
+        alignment_weight  = rng.uniform(ALIGNMENT_WEIGHT_RANGE[0],  ALIGNMENT_WEIGHT_RANGE[1],  NUM_BOIDS)
+        cohesion_weight   = rng.uniform(COHESION_WEIGHT_RANGE[0],   COHESION_WEIGHT_RANGE[1],   NUM_BOIDS)
+        sep_w_same        = rng.uniform(SEPARATION_WEIGHT_RANGE[0], SEPARATION_WEIGHT_RANGE[1], NUM_BOIDS)
+        neighbor_radius   = rng.uniform(NEIGHBOR_RADIUS_RANGE[0],   NEIGHBOR_RADIUS_RANGE[1],   NUM_BOIDS)
+        sep_r_same        = rng.uniform(SEPARATION_RADIUS_RANGE[0], SEPARATION_RADIUS_RANGE[1], NUM_BOIDS)
 
+        sep_w_other       = rng.uniform(SEPARATION_WEIGHT_OTHER_RANGE[0], SEPARATION_WEIGHT_OTHER_RANGE[1], NUM_BOIDS)
+        sep_r_other       = rng.uniform(SEPARATION_RADIUS_OTHER_RANGE[0], SEPARATION_RADIUS_OTHER_RANGE[1], NUM_BOIDS)
+
+        attrs = np.column_stack([
+            alignment_weight, cohesion_weight,
+            sep_w_same, neighbor_radius, sep_r_same,
+            sep_w_other, sep_r_other
+        ])
+        return species_id, attrs
 
 class BoidsSim:
     def __init__(self, n=NUM_BOIDS, seed=None,
@@ -69,20 +83,13 @@ class BoidsSim:
         self.n = n
         self.rng = np.random.default_rng(seed)
 
-        if init_from is None:
-            self.positions = self.rng.random((n, 2)) * np.array([WIDTH, HEIGHT], dtype=float)
-            self.velocities = (self.rng.random((n, 2)) - 0.5) * MAX_SPEED
-            self.attrs = random_attrs(n, self.rng)
-            self.alive = np.ones(n, dtype=bool)
-            self.lifespan = np.zeros(n, dtype=np.int32)
-            self.meta = {"generation": 0}
-        else:
-            self.positions = init_from["positions"].copy()
-            self.velocities = init_from["velocities"].copy()
-            self.attrs = init_from["attrs"].copy()
-            self.alive = init_from["alive"].copy()
-            self.lifespan = init_from["lifespan"].copy()
-            self.meta = dict(init_from.get("meta", {}))
+        self.species_id, self.attrs = initialize_species_and_attributes(self.rng)
+        self.positions = self.rng.random((n, 2)) * np.array([WIDTH, HEIGHT], dtype=float)
+        self.velocities = (self.rng.random((n, 2)) - 0.5) * MAX_SPEED
+        self.alive = np.ones(n, dtype=bool)
+        self.lifespan = np.zeros(n, dtype=np.int32)
+        self.meta = {"generation": 0}
+        
 
         self.frame = 0
         self.autosave_path = autosave_path
@@ -101,12 +108,15 @@ class BoidsSim:
         for i in alive_idx:
             pos_i = self.positions[i]
             vel_i = self.velocities[i]
-            a_w, c_w, s_w, n_r, s_r = self.attrs[i]
-
+            a_w, c_w, s_w, n_r, s_r, sw_other, sr_other = self.attrs[i]
+            si = self.species_id[i] # 物种id
+            
             alignment = np.zeros(2, dtype=float)
             cohesion = np.zeros(2, dtype=float)
             separation = np.zeros(2, dtype=float)
-            count = 0
+            sep_other = np.zeros(2)
+            count = 0 # 只对同类计数
+            count_other = 0
 
             for j in alive_idx:
                 if i == j:
@@ -114,19 +124,25 @@ class BoidsSim:
                 offset = self.positions[j] - pos_i
                 dist = np.linalg.norm(offset)
                 if dist < n_r:
-                    alignment += self.velocities[j]
-                    cohesion += self.positions[j]
-                    if dist < s_r:
-                        # 避免 dist=0 的数值问题
-                        if dist > 1e-12:
+                    if self.species_id[j] == si:
+                        alignment += self.velocities[j]
+                        cohesion += self.positions[j]
+                        count += 1
+                        if dist < s_r and dist > 1e-12:# 避免 dist=0 的数值问题
                             separation -= offset / dist
-                    count += 1
+                    else:#跨物种
+                        if dist < sr_other and dist > 1e-12:
+                            sep_other -= offset / dist
+                        count_other += 1
+                        
 
             if count > 0:
                 alignment = alignment / count - vel_i
                 cohesion = cohesion / count - pos_i
+            if count_other > 0:
+                sep_other = sep_other / count_other
 
-            vel_i = vel_i + a_w * alignment + c_w * cohesion + s_w * separation
+            vel_i = vel_i + a_w * alignment + c_w * cohesion + s_w * separation + sw_other * sep_other
             vel_i = limit_speed(vel_i, MAX_SPEED)
             new_vel[i] = vel_i
 
@@ -180,10 +196,25 @@ class BoidsSim:
         stride: 跳帧步长；stride=10 表示每显示一帧，模拟推进 10 步
         """
         # 颜色映射基于 attrs 的某一列；死鸟 alpha=0
-        col_idx = ATTR_NAMES.index(color_by)
-        v = self.attrs[:, col_idx]
-        norm = Normalize(vmin=float(v.min()), vmax=float(v.max()))
-        cmap = cmocean.cm.deep
+        if color_by == "species_id":
+            # 离散类别：species_id
+            v = self.species_id.astype(int)
+
+            # 物种数：若你有 NUM_SPECIES 可直接用；否则从数据推断
+            n_species = int(v.max()) + 1
+
+            # 离散色板（推荐 tab10 / Set2 这类分类色板）
+            cmap = plt.get_cmap("tab10", n_species)  # 固定 n_species 个颜色
+
+            # 边界归一化：每个整数落在自己的 bin 里
+            bounds = np.arange(-0.5, n_species + 0.5, 1.0)
+            norm = mpl.colors.BoundaryNorm(bounds, ncolors=n_species)
+
+        else:
+            col_idx = ATTR_NAMES.index(color_by)
+            v = self.attrs[:, col_idx].astype(float)
+            norm = Normalize(vmin=float(v.min()), vmax=float(v.max()))
+            cmap = cmocean.cm.deep
 
         # --- 1x2 子图布局（左：boids，右：速度箱型图）---
         fig, (ax, ax_box) = plt.subplots(
