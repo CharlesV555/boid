@@ -27,9 +27,9 @@ ATTR_NAMES = [
 ]
 ATTR_RANGES = {
     "alignment_weight": (0.05, 0.05),
-    "cohesion_weight": (0.01, 0.01),
+    "cohesion_weight": (0.01, 0.05),
     "separation_weight": (0.1, 0.1),
-    "neighbor_radius": (10.0, 15.0),
+    "neighbor_radius": (15.0, 15.0),
     "separation_radius": (5.0, 5.0),
 }
 

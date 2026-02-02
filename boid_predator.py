@@ -10,7 +10,8 @@ import cmocean
 # -----------------------------
 # Global settings
 # -----------------------------
-NUM_BOIDS = 120
+NUM_SPECIES_A = 120
+NUM_SPECIES_B = 1
 NUM_PREDATOR = 1
 WIDTH, HEIGHT = 100, 100
 MAX_SPEED = 10
@@ -18,14 +19,19 @@ MIN_SPEED = 0.01
 
 NUM_SPECIES = 3
 
-ATTR_NAMES = [
-    "species_id",
-    "alignment_weight",
-    "cohesion_weight",
-    "separation_weight",
-    "neighbor_radius",
-    "separation_radius",
-]
+ATTR_DTYPE = np.dtype([
+    # --- intra-species ---
+    ("alignment_weight",        object),
+    ("cohesion_weight",         object),
+    ("sep_w_same",              object),
+    ("sep_r_same",              object),
+
+    # --- inter-species ---
+    ("sep_w_other",             object),
+    ("sep_r_other",             object),
+    ("cohesion_weight_other",   object),
+    ("duration",                object),
+])
 
 ALIGNMENT_WEIGHT_RANGE = (0.05, 0.05)
 COHESION_WEIGHT_RANGE = (0.01, 0.01)
@@ -35,6 +41,8 @@ SEPARATION_RADIUS_RANGE = (3.0, 5.0)
 
 SEPARATION_WEIGHT_OTHER_RANGE = (0.10, 0.40)   # 跨物种更强一些（示例）
 SEPARATION_RADIUS_OTHER_RANGE = (15.0, 15.0)     # 跨物种作用半径（示例）
+COHESION_WEIGHT_OTHER_RANGE = (0.001, 0.001) # 几乎没有聚集
+DURATION_RANGE = (10, 10) # 耐力，以更新数为单位
 
 # 碰撞死亡阈值：距离 <= 1.0 撞死
 COLLISION_DIST = 0.2
@@ -49,28 +57,140 @@ def limit_speed(v, max_speed):
         return v / speed * max_speed
     return v
 
-def initialize_species_and_attributes(rng, n, n_p):
-        
-        species_id = rng.choice(NUM_SPECIES, size=NUM_BOIDS, p=p).astype(np.int32)
+def initialize_species_and_attributes(
+    rng,
+    p,          # 第一类对象数量
+    p_n,        # 第二类对象数量
+    p_species_A,  # shape = (NUM_SPECIES_A,)
+    p_species_B,  # shape = (NUM_SPECIES_B,)
+):
+    """
+    返回：
+        species_id : (p+p_n,) int32
+        attrs      : structured array[alignment_weight,
+                                      cohesion_weight, 
+                                      sep_w_same,
+                                      sep_r_same,
+                                      sep_w_other,
+                                      sep_r_other,
+                                      
+                                      cohesion_weight_other,
+                                      duration,
+                                      ], length p+p_n
+    """
+    total = p + p_n
 
-        alignment_weight  = rng.uniform(ALIGNMENT_WEIGHT_RANGE[0],  ALIGNMENT_WEIGHT_RANGE[1],  NUM_BOIDS)
-        cohesion_weight   = rng.uniform(COHESION_WEIGHT_RANGE[0],   COHESION_WEIGHT_RANGE[1],   NUM_BOIDS)
-        sep_w_same        = rng.uniform(SEPARATION_WEIGHT_RANGE[0], SEPARATION_WEIGHT_RANGE[1], NUM_BOIDS)
-        neighbor_radius   = rng.uniform(NEIGHBOR_RADIUS_RANGE[0],   NEIGHBOR_RADIUS_RANGE[1],   NUM_BOIDS)
-        sep_r_same        = rng.uniform(SEPARATION_RADIUS_RANGE[0], SEPARATION_RADIUS_RANGE[1], NUM_BOIDS)
+    species_id = np.empty(total, dtype=np.int32)
 
-        sep_w_other       = rng.uniform(SEPARATION_WEIGHT_OTHER_RANGE[0], SEPARATION_WEIGHT_OTHER_RANGE[1], NUM_BOIDS)
-        sep_r_other       = rng.uniform(SEPARATION_RADIUS_OTHER_RANGE[0], SEPARATION_RADIUS_OTHER_RANGE[1], NUM_BOIDS)
+    # -----------------------------
+    # 第一类对象：species A
+    # -----------------------------
+    species_id[:p] = rng.choice(
+        NUM_SPECIES_A,
+        size=p,
+    ).astype(np.int32)
 
-        attrs = np.column_stack([
-            alignment_weight, cohesion_weight,
-            sep_w_same, neighbor_radius, sep_r_same,
-            sep_w_other, sep_r_other
-        ])
-        return species_id, attrs
+    # -----------------------------
+    # 第二类对象：species B（整体偏移）
+    # -----------------------------
+    species_id[p:] = (
+        rng.choice(
+            NUM_SPECIES_B,
+            size=p_n,
+        ) + NUM_SPECIES_A
+    ).astype(np.int32)
+
+    # -----------------------------
+    # 2) 初始化结构化 attrs
+    # -----------------------------
+    attrs = np.empty(total, dtype=ATTR_DTYPE)
+
+    # 先全部设为 None（非常重要）
+    for name in attrs.dtype.names:
+        attrs[name] = None
+
+    # -----------------------------
+    # 3) 第一类对象（0 ~ p-1）
+    #    从参数空间 A 采样
+    # -----------------------------
+    idx_A = slice(0, p)
+
+    attrs["alignment_weight"][idx_A] = rng.uniform(
+        ALIGNMENT_WEIGHT_RANGE[0],
+        ALIGNMENT_WEIGHT_RANGE[1],
+        p
+    )
+
+    attrs["cohesion_weight"][idx_A] = rng.uniform(
+        COHESION_WEIGHT_RANGE[0],
+        COHESION_WEIGHT_RANGE[1],
+        p
+    )
+
+    attrs["sep_w_same"][idx_A] = rng.uniform(
+        SEPARATION_WEIGHT_RANGE[0],
+        SEPARATION_WEIGHT_RANGE[1],
+        p
+    )
+
+    attrs["sep_r_same"][idx_A] = rng.uniform(
+        SEPARATION_RADIUS_RANGE[0],
+        SEPARATION_RADIUS_RANGE[1],
+        p
+    )
+
+    # inter-species（若该类对象不具备，保持 None）
+    attrs["sep_w_other"][idx_A] = rng.uniform(
+        SEPARATION_WEIGHT_OTHER_RANGE[0],
+        SEPARATION_WEIGHT_OTHER_RANGE[1],
+        p
+    )
+
+    attrs["sep_r_other"][idx_A] = rng.uniform(
+        SEPARATION_RADIUS_OTHER_RANGE[0],
+        SEPARATION_RADIUS_OTHER_RANGE[1],
+        p
+    )
+
+    # -----------------------------
+    # 4) 第二类对象（p ~ p+p_n-1）
+    #    从参数空间 B 采样
+    # -----------------------------
+    idx_B = slice(p, total)
+
+    # intra-species：可能没有
+    # -> 保持 None
+
+    # inter-species 特有属性
+    attrs["cohesion_weight_other"][idx_B] = rng.uniform(
+        COHESION_WEIGHT_OTHER_RANGE[0],
+        COHESION_WEIGHT_OTHER_RANGE[1],
+        p_n
+    )
+
+    attrs["duration"][idx_B] = rng.uniform(
+        DURATION_RANGE[0],
+        DURATION_RANGE[1],
+        p_n
+    )
+
+    # attrs["sep_w_other"][idx_B] = rng.uniform(
+    #     SEPARATION_WEIGHT_OTHER_RANGE[0],
+    #     SEPARATION_WEIGHT_OTHER_RANGE[1],
+    #     p_n
+    # )
+
+    # attrs["sep_r_other"][idx_B] = rng.uniform(
+    #     SEPARATION_RADIUS_OTHER_RANGE[0],
+    #     SEPARATION_RADIUS_OTHER_RANGE[1],
+    #     p_n
+    # )
+
+    return species_id, attrs
+
 
 class BoidsSim:
-    def __init__(self, n=NUM_BOIDS, n_p=NUM_PREDATOR, seed=None,
+    def __init__(self, n=NUM_SPECIES_A, n_p=NUM_SPECIES_B, seed=None,
                  init_from=None,
                  autosave_path=None,
                  autosave_meta=None):
@@ -85,11 +205,11 @@ class BoidsSim:
         autosave_path:
           - 关闭窗口时自动存档（npz）
         """
-        self.n = n # total number
-        self.predator_n = n_p
+        self.n = n # specie A
+        self.predator_n = n_p # predator B
         self.rng = np.random.default_rng(seed)
 
-        self.species_id, self.attrs = initialize_species_and_attributes(self.rng, self.n. self.n_p)
+        self.species_id, self.attrs = initialize_species_and_attributes(self.rng, self.n, self.predator_n, self.n, self.predator_n)
         self.positions = self.rng.random((n, 2)) * np.array([WIDTH, HEIGHT], dtype=float)
         self.velocities = (self.rng.random((n, 2)) - 0.5) * MAX_SPEED
         self.alive = np.ones(n, dtype=bool)
@@ -102,65 +222,128 @@ class BoidsSim:
         self.autosave_meta = autosave_meta if autosave_meta is not None else {}
 
     def step(self):
-        """单步更新（只对 alive 的鸟计算邻居/速度/位置），然后做碰撞检测并更新死亡。"""
+        """单步更新：species-aware 的 Boids + 捕食接口"""
+
         new_vel = self.velocities.copy()
 
-        alive_idx = np.where(self.alive)[0]
-        if len(alive_idx) == 0:
+        alive_idx = np.flatnonzero(self.alive)
+        if alive_idx.size == 0:
             self.frame += 1
             return
 
-        # 速度更新：对每个活鸟 i，扫描其他活鸟作为邻居
         for i in alive_idx:
             pos_i = self.positions[i]
             vel_i = self.velocities[i]
-            a_w, c_w, s_w, n_r, s_r, sw_other, sr_other = self.attrs[i]
-            si = self.species_id[i] # 物种id
-            
-            alignment = np.zeros(2, dtype=float)
-            cohesion = np.zeros(2, dtype=float)
-            separation = np.zeros(2, dtype=float)
-            sep_other = np.zeros(2)
-            count = 0 # 只对同类计数
-            count_other = 0
+            si = self.species_id[i]
 
+            attr = self.attrs[i]
+
+            # -----------------------------
+            # 初始化力项
+            # -----------------------------
+            align = np.zeros(2)
+            coh_same = np.zeros(2)
+            sep_same = np.zeros(2)
+
+            coh_other = np.zeros(2)
+            sep_other = np.zeros(2)
+
+            cnt_same = 0
+            cnt_other = 0
+
+            # -----------------------------
+            # 扫描邻居
+            # -----------------------------
             for j in alive_idx:
                 if i == j:
                     continue
+
                 offset = self.positions[j] - pos_i
                 dist = np.linalg.norm(offset)
-                if dist < n_r:
-                    if self.species_id[j] == si:
-                        alignment += self.velocities[j]
-                        cohesion += self.positions[j]
-                        count += 1
-                        if dist < s_r and dist > 1e-12:# 避免 dist=0 的数值问题
-                            separation -= offset / dist
-                    else:#跨物种
-                        if dist < sr_other and dist > 1e-12:
+                if dist < 1e-12:
+                    continue
+
+                sj = self.species_id[j]
+
+                # ===== 同类 =====
+                if sj == si:
+                    if attr["sep_r_same"] is not None and dist <= attr["sep_r_same"]:
+                        sep_same -= offset / dist
+
+                    # 对齐 & 聚集没有硬半径（可后续加）
+                    align += self.velocities[j]
+                    coh_same += self.positions[j]
+                    cnt_same += 1
+
+                # ===== 异类 =====
+                else:
+                    # 第一类：只做分离
+                    if si < NUM_SPECIES_A:
+                        if attr["sep_r_other"] is not None and dist <= attr["sep_r_other"]:
                             sep_other -= offset / dist
-                        count_other += 1
-                        
+                            cnt_other += 1
 
-            if count > 0:
-                alignment = alignment / count - vel_i
-                cohesion = cohesion / count - pos_i
-            if count_other > 0:
-                sep_other = sep_other / count_other
+                    # 第二类（捕食者）
+                    else:
+                        # 聚集到猎物（捕食接口）
+                        coh_other += self.positions[j]
+                        cnt_other += 1
 
-            vel_i = vel_i + a_w * alignment + c_w * cohesion + s_w * separation + sw_other * sep_other
+            # -----------------------------
+            # 汇总同类项
+            # -----------------------------
+            if cnt_same > 0:
+                align = align / cnt_same - vel_i
+                coh_same = coh_same / cnt_same - pos_i
+
+            if cnt_other > 0:
+                coh_other = coh_other / cnt_other - pos_i
+                sep_other = sep_other / cnt_other
+
+            # -----------------------------
+            # 速度更新（按 species 分支）
+            # -----------------------------
+            if si < NUM_SPECIES_A:
+                # ===== 第一类对象 =====
+                vel_i = (
+                    vel_i
+                    + (attr["alignment_weight"] or 0.0) * align
+                    + (attr["cohesion_weight"] or 0.0) * coh_same
+                    + (attr["sep_w_same"] or 0.0) * sep_same
+                    + (attr["sep_w_other"] or 0.0) * sep_other
+                )
+
+            else:
+                # ===== 第二类对象（捕食者）=====
+                stamina = attr["duration"] or 0.0
+
+                vel_i = (
+                    vel_i
+                    + (attr["alignment_weight"] or 0.0) * align
+                    + (attr["cohesion_weight"] or 0.0) * coh_same
+                    + (attr["sep_w_same"] or 0.0) * sep_same
+                    + (attr["cohesion_weight_other"] or 0.0) * coh_other * stamina
+                )
+
             vel_i = limit_speed(vel_i, MAX_SPEED)
             new_vel[i] = vel_i
 
-        # 位置更新（死鸟不动）
-        self.positions[self.alive] = (self.positions[self.alive] + new_vel[self.alive]) % np.array([WIDTH, HEIGHT])
+        # -----------------------------
+        # 位置更新
+        # -----------------------------
+        self.positions[self.alive] = (
+            self.positions[self.alive] + new_vel[self.alive]
+        ) % np.array([WIDTH, HEIGHT])
+
         self.velocities[self.alive] = new_vel[self.alive]
 
-        # 生存帧数累加
+        # -----------------------------
+        # lifespan
+        # -----------------------------
         self.lifespan[self.alive] += 1
 
-        # 碰撞检测（距离 <= COLLISION_DIST 的两只活鸟都死亡）
-        # self._apply_collisions()
+        # 碰撞 / 捕食逻辑接口（暂不启用）
+        # self._apply_collisions_or_predation()
 
         self.frame += 1
 
@@ -196,6 +379,9 @@ class BoidsSim:
     def all_dead(self):
         return self.alive_count() == 0
     
+    
+    
+
     def run_animation(self, frames=600, interval=20, color_by=COLOR_BY, stride=1):
         """
         frames: 最大模拟步数（max_steps），注意现在语义是“模拟步上限”，不是“回调次数”
@@ -363,7 +549,8 @@ class BoidsSim:
 if __name__ == "__main__":
     # ====== 1) 跑第0代：随机初始化，关闭窗口后自动存档 ======
     sim0 = BoidsSim(
-        n=NUM_BOIDS,
+        n=NUM_SPECIES_A,
+        n_p=NUM_SPECIES_B,
         seed=42,
         init_from=None,
         autosave_path="gen0.npz",
